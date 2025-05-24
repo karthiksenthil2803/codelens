@@ -1,0 +1,58 @@
+{% extends 'base.html' %}
+
+{% block content %}
+    <h1>{% block title %} PR Analysis System Architecture {% endblock %}</h1>
+    
+    <div class="architecture">
+        <h2>System Components</h2>
+        
+        <div class="component">
+            <h3>PR Event Webhook Listener</h3>
+            <p>Receives GitHub webhook and extracts PR metadata.</p>
+            <p><strong>Input:</strong> PR webhook payload</p>
+            <p><strong>Output:</strong> Triggers PR analysis with metadata and diffs</p>
+        </div>
+        
+        <div class="component">
+            <h3>Repo Relationship Store</h3>
+            <p>Stores cross-repo dependencies.</p>
+            <p><strong>Input:</strong> Service definitions, config files, custom admin input</p>
+            <p><strong>Output:</strong> List of related repositories and components</p>
+        </div>
+        
+        <div class="component">
+            <h3>PR Analysis Utility</h3>
+            <p>Central orchestrator for processing the PR and determining impacts.</p>
+            <p><strong>Input:</strong> PR metadata, diffs, related repo info</p>
+            <p><strong>Output:</strong> Change summary for further analysis</p>
+        </div>
+        
+        <div class="component">
+            <h3>Dependency Mapper</h3>
+            <p>Maps component interactions within and across services.</p>
+            <p><strong>Input:</strong> Code diffs, static analysis results</p>
+            <p><strong>Output:</strong> Impacted modules and test files</p>
+        </div>
+        
+        <div class="component">
+            <h3>Context Generator</h3>
+            <p>Builds structured prompt for LLM.</p>
+            <p><strong>Input:</strong> Diffs, test names, cross-repo impacts</p>
+            <p><strong>Output:</strong> Prompt text for LLM</p>
+        </div>
+        
+        <div class="component">
+            <h3>LLM Engine</h3>
+            <p>Performs reasoning and generates analysis.</p>
+            <p><strong>Input:</strong> Context prompt</p>
+            <p><strong>Output:</strong> Summary and recommendations</p>
+        </div>
+        
+        <div class="component">
+            <h3>GitHub Comment Bot</h3>
+            <p>Posts the LLM analysis to GitHub PR.</p>
+            <p><strong>Input:</strong> LLM output</p>
+            <p><strong>Output:</strong> GitHub comment with detailed suggestions</p>
+        </div>
+    </div>
+{% endblock %}

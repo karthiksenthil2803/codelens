@@ -1,0 +1,24 @@
+{% extends 'base.html' %}
+
+{% block content %}
+    <h1>{% block title %} PR Analysis Utility for Java Microservices {% endblock %}</h1>
+    
+    <div class="description">
+        <p>This system provides automated analysis of Pull Requests (PRs) in Java Spring Boot microservice repositories stored on GitHub.</p>
+        
+        <h2>Features</h2>
+        <ul>
+            <li>Webhook integration with GitHub for automatic PR analysis</li>
+            <li>Cross-repository dependency analysis</li>
+            <li>AI-powered code review suggestions using LLMs</li>
+            <li>Impact assessment for Java microservices</li>
+        </ul>
+        
+        <h2>Setup</h2>
+        <ol>
+            <li>Configure your GitHub repository to send PR webhooks to <code>/webhook</code></li>
+            <li>Set up repository relationships using the API endpoint <code>/api/relationships</code></li>
+            <li>Configure environment variables for LLM API access and GitHub token</li>
+        </ol>
+    </div>
+{% endblock %}
