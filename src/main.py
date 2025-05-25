@@ -38,8 +38,9 @@ def webhook():
 
 if __name__ == '__main__':
     # app.run(debug=True)
-    repo_name = 'karthiksenthil2803/get-your-guide-web-scraper'
-    pr_number = 4
+    # repo_name = 'karthiksenthil2803/get-your-guide-web-scraper'
+    repo_name = 'karthiksenthil2803/codelens'
+    pr_number = 1
     commits = pr_reader.read_commits(repo_name, pr_number)
     pr_reader.save_commits_to_folder(repo_name, pr_number, commits)
     

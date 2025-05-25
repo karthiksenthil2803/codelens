@@ -1,8 +1,9 @@
 import os
 import yaml
 import google.generativeai as genai
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple
 from dotenv import load_dotenv
+import re
 
 class DependencyAnalyzer:
     def __init__(self, github_client):
@@ -51,6 +52,58 @@ class DependencyAnalyzer:
             print(f"Error fetching repository structure: {e}")
             return []
     
+    def find_potential_affected_files(self, repo_name: str, changed_file_path: str, dependencies: List[Dict]) -> List[Tuple[str, str]]:
+        """Find files that potentially use the changed dependencies"""
+        repo_files = self.get_repository_structure(repo_name)
+        potentially_affected = []
+        
+        # Filter relevant files (exclude non-code files)
+        code_extensions = ['.py', '.js', '.ts', '.java', '.cpp', '.c', '.h', '.go', '.rs', '.rb', '.php']
+        relevant_files = [f for f in repo_files if any(f.endswith(ext) for ext in code_extensions)]
+        
+        for file_path in relevant_files:
+            if file_path == changed_file_path:
+                continue
+                
+            file_content = self.get_file_content(repo_name, file_path)
+            if file_content:
+                # Check if this file might be affected by analyzing imports and usage
+                for dependency in dependencies:
+                    dep_name = dependency.get('name', '')
+                    if self._check_file_uses_dependency(file_content, changed_file_path, dep_name):
+                        potentially_affected.append((file_path, file_content))
+                        break
+        
+        return potentially_affected
+    
+    def _check_file_uses_dependency(self, file_content: str, changed_file_path: str, dependency_name: str) -> bool:
+        """Check if a file potentially uses a dependency from the changed file"""
+        # Check for imports from the changed file
+        module_name = changed_file_path.replace('/', '.').replace('.py', '').replace('.js', '').replace('.ts', '')
+        
+        import_patterns = [
+            f"from {module_name} import",
+            f"import {module_name}",
+            f"from .{os.path.basename(changed_file_path).split('.')[0]} import",
+            f"import .{os.path.basename(changed_file_path).split('.')[0]}",
+            f"require('{module_name}')",
+            f'require("{module_name}")',
+        ]
+        
+        # Check for direct usage of dependency name
+        usage_patterns = [
+            f"{dependency_name}(",
+            f"{dependency_name}.",
+            f"= {dependency_name}",
+            f"@{dependency_name}",
+        ]
+        
+        for pattern in import_patterns + usage_patterns:
+            if pattern in file_content:
+                return True
+        
+        return False
+    
     def analyze_dependencies(self, repo_name: str, yaml_file_path: str) -> Dict[str, Any]:
         """Analyze dependencies from YAML file containing patch data"""
         # Load YAML data
@@ -64,14 +117,12 @@ class DependencyAnalyzer:
         # Get current file content
         current_content = self.get_file_content(repo_name, file_path)
         
-        # Get repository structure
-        repo_files = self.get_repository_structure(repo_name)
-        
         # Analyze each change
         analysis_results = {
             'file_path': file_path,
             'dependencies_found': [],
             'potential_impacts': [],
+            'specific_changes_needed': [],
             'analysis_summary': ''
         }
         
@@ -79,10 +130,23 @@ class DependencyAnalyzer:
             patch = change.get('patch', '')
             if patch:
                 dependency_analysis = self._analyze_patch_with_gemini(
-                    file_path, current_content, patch, repo_files, change['status']
+                    file_path, current_content, patch, change['status']
                 )
                 analysis_results['dependencies_found'].extend(dependency_analysis.get('dependencies', []))
                 analysis_results['potential_impacts'].extend(dependency_analysis.get('impacts', []))
+        
+        # Find affected files and analyze specific changes needed
+        if analysis_results['dependencies_found']:
+            affected_files = self.find_potential_affected_files(
+                repo_name, file_path, analysis_results['dependencies_found']
+            )
+            
+            for affected_file_path, affected_file_content in affected_files:
+                specific_changes = self._analyze_specific_changes_needed(
+                    file_path, affected_file_path, affected_file_content, 
+                    analysis_results['dependencies_found'], changes
+                )
+                analysis_results['specific_changes_needed'].extend(specific_changes)
         
         # Generate overall summary
         analysis_results['analysis_summary'] = self._generate_summary(analysis_results)
@@ -90,18 +154,18 @@ class DependencyAnalyzer:
         return analysis_results
     
     def _analyze_patch_with_gemini(self, file_path: str, file_content: str, 
-                                  patch: str, repo_files: List[str], status: str) -> Dict[str, Any]:
+                                  patch: str, status: str) -> Dict[str, Any]:
         """Use Gemini to analyze patch for dependencies"""
         
         prompt = f"""
-        Analyze the following code patch for a file in a software repository to identify dependencies and potential impacts:
+        Analyze the following code patch to identify specific dependencies that changed:
 
         FILE PATH: {file_path}
         CHANGE STATUS: {status}
         
         CURRENT FILE CONTENT:
         ```
-        {file_content[:3000]}  # Truncate for token limits
+        {file_content[:2000]}
         ```
         
         PATCH CHANGES:
@@ -109,53 +173,44 @@ class DependencyAnalyzer:
         {patch}
         ```
         
-        REPOSITORY FILES (sample):
-        {repo_files[:50]}  # Show first 50 files for context
+        Please identify EXACTLY what changed and provide:
+        1. **Dependencies**: List specific functions, classes, variables, methods, or imports that were:
+           - Added (new items)
+           - Modified (signature changes, renamed, behavior changes)
+           - Removed (deleted items)
         
-        Please analyze and provide:
-        1. **Dependencies**: List any classes, functions, variables, decorators, imports, or modules that are:
-           - Added, modified, or removed in this patch
-           - Might be used by other files in the repository
-           - Could affect the API or interface of this file
-        
-        2. **Potential Impacts**: Identify files or components that might be affected by these changes:
-           - Files that might import from this file
-           - Files that might call functions/classes modified here
-           - Test files that might need updates
-           - Configuration files that might reference these changes
-        
-        3. **Risk Level**: Assess the risk level (LOW, MEDIUM, HIGH) based on:
-           - How widely used the changed components might be
-           - Whether the changes are breaking or backwards compatible
-           - The type of changes (additions vs modifications vs deletions)
+        2. **Change Details**: For each dependency, specify:
+           - Exact name and type
+           - What specifically changed (parameters, return type, behavior)
+           - Whether it's a breaking change
         
         Respond in JSON format:
         {{
             "dependencies": [
                 {{
-                    "name": "function/class/variable name",
-                    "type": "function|class|variable|decorator|import|module",
+                    "name": "exact_function_or_class_name",
+                    "type": "function|class|variable|method|import|decorator",
                     "action": "added|modified|removed",
-                    "description": "brief description of the dependency"
+                    "details": "specific details of what changed",
+                    "breaking_change": true/false,
+                    "old_signature": "previous signature if modified",
+                    "new_signature": "new signature if modified"
                 }}
             ],
             "impacts": [
                 {{
-                    "affected_component": "description of what might be affected",
+                    "affected_component": "what might be affected",
                     "risk_level": "LOW|MEDIUM|HIGH",
-                    "reason": "explanation of why this might be impacted"
+                    "reason": "why this might be impacted"
                 }}
-            ],
-            "overall_risk": "LOW|MEDIUM|HIGH",
-            "summary": "brief summary of the analysis"
+            ]
         }}
         """
         
         try:
             response = self.model.generate_content(prompt)
-            
-            # Extract JSON from response
             response_text = response.text
+            
             if "```json" in response_text:
                 json_start = response_text.find("```json") + 7
                 json_end = response_text.find("```", json_start)
@@ -168,19 +223,97 @@ class DependencyAnalyzer:
             
         except Exception as e:
             print(f"Error analyzing with Gemini: {e}")
-            return {
-                "dependencies": [],
-                "impacts": [],
-                "overall_risk": "UNKNOWN",
-                "summary": f"Analysis failed: {str(e)}"
-            }
+            return {"dependencies": [], "impacts": []}
+    
+    def _analyze_specific_changes_needed(self, changed_file_path: str, affected_file_path: str, 
+                                       affected_file_content: str, dependencies: List[Dict], 
+                                       changes: List[Dict]) -> List[Dict]:
+        """Analyze what specific changes are needed in affected files"""
+        
+        # Get the patches for context
+        patches = [change.get('patch', '') for change in changes if change.get('patch')]
+        combined_patches = '\n'.join(patches)
+        
+        prompt = f"""
+        Analyze what specific code changes are needed in an affected file due to changes in another file:
+
+        CHANGED FILE: {changed_file_path}
+        AFFECTED FILE: {affected_file_path}
+        
+        CHANGES MADE (patches):
+        ```
+        {combined_patches[:2000]}
+        ```
+        
+        DEPENDENCIES IDENTIFIED:
+        {yaml.dump(dependencies, default_flow_style=False)}
+        
+        AFFECTED FILE CONTENT:
+        ```
+        {affected_file_content[:3000]}
+        ```
+        
+        Please analyze and identify:
+        1. **Specific Lines/Sections** in the affected file that need changes
+        2. **Exact Changes Required** (what to modify, add, or remove)
+        3. **Code Examples** of the required changes
+        4. **Reason** why each change is necessary
+        
+        Focus on:
+        - Import statements that need updating
+        - Function/method calls that need parameter changes
+        - Class instantiations that need modification
+        - Variable assignments that need updates
+        - Error handling that might be affected
+        
+        Respond in JSON format:
+        {{
+            "changes_needed": [
+                {{
+                    "line_numbers": "approximate line numbers or 'imports section'",
+                    "current_code": "current code that needs changing",
+                    "required_change": "what needs to be changed",
+                    "new_code_example": "example of corrected code",
+                    "reason": "why this change is necessary",
+                    "change_type": "import|function_call|class_usage|variable|error_handling|other",
+                    "priority": "HIGH|MEDIUM|LOW"
+                }}
+            ],
+            "summary": "overall summary of changes needed in this file"
+        }}
+        """
+        
+        try:
+            response = self.model.generate_content(prompt)
+            response_text = response.text
+            
+            if "```json" in response_text:
+                json_start = response_text.find("```json") + 7
+                json_end = response_text.find("```", json_start)
+                json_text = response_text[json_start:json_end].strip()
+            else:
+                json_text = response_text
+            
+            import json
+            analysis = json.loads(json_text)
+            
+            # Add file path to each change
+            for change in analysis.get('changes_needed', []):
+                change['affected_file'] = affected_file_path
+            
+            return analysis.get('changes_needed', [])
+            
+        except Exception as e:
+            print(f"Error analyzing specific changes with Gemini: {e}")
+            return []
     
     def _generate_summary(self, analysis_results: Dict[str, Any]) -> str:
         """Generate a summary of the analysis"""
         dependencies_count = len(analysis_results['dependencies_found'])
         impacts_count = len(analysis_results['potential_impacts'])
+        changes_count = len(analysis_results['specific_changes_needed'])
         
-        return f"Found {dependencies_count} dependencies and {impacts_count} potential impacts for {analysis_results['file_path']}"
+        return f"Found {dependencies_count} dependencies, {impacts_count} potential impacts, and {changes_count} specific changes needed for {analysis_results['file_path']}"
     
     def save_analysis(self, analysis_results: Dict[str, Any], output_path: str):
         """Save analysis results to YAML file"""
