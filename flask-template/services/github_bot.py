@@ -73,7 +73,8 @@ class GitHubCommentBot:
         data = {
             "body": comment_body
         }
-        
+
+        # Test comment
         response = requests.post(url, headers=headers, json=data)
         
         if response.status_code == 201:
