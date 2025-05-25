@@ -1,0 +1,16 @@
+Commit: cd72612620c6e719f20aaaf2faf0507206958b88
+Message: Test commit
+
+File: flask-template/services/github_bot.py
+Patch:
+@@ -73,7 +73,8 @@ def _post_github_comment(self, repo_full_name: str, pr_number: int, comment_body
+         data = {
+             "body": comment_body
+         }
+-        
++
++        # Test comment
+         response = requests.post(url, headers=headers, json=data)
+         
+         if response.status_code == 201:
+
