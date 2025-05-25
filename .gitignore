@@ -2,4 +2,10 @@
 
 __pycache__/
 
-venv/
+venv/\
+
+data/
+
+.conda/
+
+src/__pycache__
