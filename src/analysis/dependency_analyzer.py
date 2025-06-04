@@ -4,10 +4,13 @@ import google.generativeai as genai
 from typing import Dict, List, Any, Tuple
 from dotenv import load_dotenv
 import re
+from src.analysis.cross_repo_analyzer import CrossRepoAnalyzer
+import time
 
 class DependencyAnalyzer:
     def __init__(self, github_client):
         self.github_client = github_client
+        self.cross_repo_analyzer = CrossRepoAnalyzer(github_client)
         load_dotenv()
         
         # Configure Gemini
@@ -104,7 +107,8 @@ class DependencyAnalyzer:
         
         return False
     
-    def analyze_dependencies(self, repo_name: str, yaml_file_path: str) -> Dict[str, Any]:
+    def analyze_dependencies(self, repo_name: str, yaml_file_path: str, 
+                           cross_repo_targets: List[str] = None) -> Dict[str, Any]:
         """Analyze dependencies from YAML file containing patch data"""
         # Load YAML data
         with open(yaml_file_path, 'r', encoding='utf-8') as file:
@@ -147,6 +151,46 @@ class DependencyAnalyzer:
                     analysis_results['dependencies_found'], changes
                 )
                 analysis_results['specific_changes_needed'].extend(specific_changes)
+            
+            # Analyze cross-repository impacts comprehensively
+            if cross_repo_targets:
+                print(f"Starting comprehensive cross-repository analysis for {len(cross_repo_targets)} repositories...")
+                print(f"Found {len(analysis_results['dependencies_found'])} dependencies to analyze")
+                start_time = time.time()
+                
+                try:
+                    cross_repo_analysis = self.cross_repo_analyzer.analyze_cross_repo_dependencies(
+                        repo_name, analysis_results['dependencies_found'], file_path, cross_repo_targets
+                    )
+                    analysis_results['cross_repository_impacts'] = cross_repo_analysis
+                    
+                    elapsed_time = time.time() - start_time
+                    impact_count = len(cross_repo_analysis.get('cross_repo_dependencies', []))
+                    print(f"Comprehensive cross-repository analysis completed in {elapsed_time:.2f} seconds")
+                    print(f"Found {impact_count} cross-repository impacts")
+                    
+                except Exception as e:
+                    print(f"Cross-repository analysis failed: {e}")
+                    analysis_results['cross_repository_impacts'] = {
+                        'analyzed_repos': cross_repo_targets,
+                        'cross_repo_dependencies': [],
+                        'affected_repositories': [],
+                        'summary': f'Cross-repository analysis failed: {str(e)}'
+                    }
+            else:
+                analysis_results['cross_repository_impacts'] = {
+                    'analyzed_repos': [],
+                    'cross_repo_dependencies': [],
+                    'affected_repositories': [],
+                    'summary': 'No target repositories specified for cross-repository analysis.'
+                }
+        else:
+            analysis_results['cross_repository_impacts'] = {
+                'analyzed_repos': [],
+                'cross_repo_dependencies': [],
+                'affected_repositories': [],
+                'summary': 'No dependencies found to analyze cross-repository impacts.'
+            }
         
         # Generate overall summary
         analysis_results['analysis_summary'] = self._generate_summary(analysis_results)
@@ -312,8 +356,16 @@ class DependencyAnalyzer:
         dependencies_count = len(analysis_results['dependencies_found'])
         impacts_count = len(analysis_results['potential_impacts'])
         changes_count = len(analysis_results['specific_changes_needed'])
+        cross_repo_count = len(analysis_results.get('cross_repository_impacts', {}).get('cross_repo_dependencies', []))
         
-        return f"Found {dependencies_count} dependencies, {impacts_count} potential impacts, and {changes_count} specific changes needed for {analysis_results['file_path']}"
+        summary = f"Found {dependencies_count} dependencies, {impacts_count} potential impacts, and {changes_count} specific changes needed"
+        
+        if cross_repo_count > 0:
+            summary += f", with {cross_repo_count} cross-repository impacts"
+        
+        summary += f" for {analysis_results['file_path']}"
+        
+        return summary
     
     def save_analysis(self, analysis_results: Dict[str, Any], output_path: str):
         """Save analysis results to YAML file"""

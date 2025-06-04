@@ -3,3 +3,4 @@ PyGithub
 python-dotenv
 PyYAML
 google-generativeai
+aiohttp
