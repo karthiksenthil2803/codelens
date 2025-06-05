@@ -20,11 +20,15 @@ from src.github.webhook import WebhookListener
 from src.github.pull_request import PRReader
 from src.github.comment import PRCommenter
 from src.analysis.dependency_analyzer import DependencyAnalyzer
+from src.cache.repository_cache import RepositoryCache
 
 webhook_listener = WebhookListener()
 pr_reader = PRReader(github_client)
 pr_commenter = PRCommenter(github_client)
 dependency_analyzer = DependencyAnalyzer(github_client)
+
+# Initialize repository cache
+repository_cache = RepositoryCache(github_client)
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -50,11 +54,29 @@ if __name__ == '__main__':
     yaml_pattern = f"src/data/{repo_name.replace('/', '_')}_PR_{pr_number}/**/*.yaml"
     yaml_files = glob.glob(yaml_pattern, recursive=True)
     
-    # Specify target repositories for cross-repo analysis (limit to most important ones)
+    # Specify target repositories for cross-repo analysis
     cross_repo_targets = [
         'karthiksenthil2803/test-codelens-2',
-        # Add more repositories as needed, but keep the list small for performance
+        # Add more repositories as needed
     ]
+    
+    # Pre-populate cache for all target repositories
+    print("Pre-populating repository cache...")
+    cache_start_time = time.time()
+    
+    # Show initial cache stats
+    cache_stats = repository_cache.get_cache_stats()
+    print(f"Initial cache: {cache_stats['total_repositories']} repos, {cache_stats['total_files']} files")
+    
+    # Download all target repositories to cache
+    cached_repos = repository_cache.bulk_download_repositories(cross_repo_targets, force_refresh=False)
+    
+    cache_elapsed = time.time() - cache_start_time
+    print(f"Cache preparation completed in {cache_elapsed:.2f} seconds")
+    
+    # Show updated cache stats
+    cache_stats = repository_cache.get_cache_stats()
+    print(f"Updated cache: {cache_stats['total_repositories']} repos, {cache_stats['total_files']} files, {cache_stats['total_size_mb']:.2f} MB\n")
     
     total_start_time = time.time()
     
@@ -84,3 +106,9 @@ if __name__ == '__main__':
     
     total_elapsed = time.time() - total_start_time
     print(f"Total analysis completed in {total_elapsed:.2f} seconds")
+    
+    # Show final cache stats
+    print("\nFinal cache statistics:")
+    cache_stats = repository_cache.get_cache_stats()
+    for repo_stats in cache_stats['repositories']:
+        print(f"  {repo_stats['repo_name']}: {repo_stats['file_count']} files, {repo_stats['size_mb']:.2f} MB, Valid: {repo_stats['cache_valid']}")

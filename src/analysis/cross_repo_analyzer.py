@@ -8,6 +8,7 @@ import asyncio
 import aiohttp
 from concurrent.futures import ThreadPoolExecutor
 import time
+from src.cache.repository_cache import RepositoryCache
 
 class CrossRepoAnalyzer:
     def __init__(self, github_client):
@@ -22,12 +23,30 @@ class CrossRepoAnalyzer:
         genai.configure(api_key=api_key)
         self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
         
-        # Performance optimization settings - no file limits to avoid missing files
-        self.max_file_size = 500000  # Increased to 500KB to avoid skipping important files
-        self.file_cache = {}  # Cache file contents
-        self.max_workers = 4  # Increased concurrent operations
-        self.batch_size = 20  # Process files in batches
+        # Initialize cache
+        self.cache = RepositoryCache(github_client)
+        
+        # Performance optimization settings
+        self.max_workers = 4
+        self.batch_size = 20
     
+    def prepare_repositories_cache(self, repo_names: List[str], force_refresh: bool = False) -> Dict[str, Dict[str, str]]:
+        """Pre-download and cache all repositories before analysis"""
+        print(f"Preparing cache for {len(repo_names)} repositories...")
+        
+        # Show cache stats before download
+        cache_stats = self.cache.get_cache_stats()
+        print(f"Current cache: {cache_stats['total_repositories']} repos, {cache_stats['total_files']} files, {cache_stats['total_size_mb']:.2f} MB")
+        
+        # Download all repositories
+        all_cached_files = self.cache.bulk_download_repositories(repo_names, force_refresh)
+        
+        # Show updated cache stats
+        cache_stats = self.cache.get_cache_stats()
+        print(f"Updated cache: {cache_stats['total_repositories']} repos, {cache_stats['total_files']} files, {cache_stats['total_size_mb']:.2f} MB")
+        
+        return all_cached_files
+
     def get_user_repositories(self, username: str) -> List[str]:
         """Get all repositories for a user"""
         try:
@@ -136,25 +155,21 @@ class CrossRepoAnalyzer:
         return files
     
     def get_file_content_from_repo_cached(self, repo_name: str, file_path: str) -> str:
-        """Get file content with caching and size limits"""
-        cache_key = f"{repo_name}/{file_path}"
+        """Get file content from cache first, fallback to API if needed"""
+        # Try cache first
+        cached_content = self.cache.get_cached_file_content(repo_name, file_path)
+        if cached_content:
+            return cached_content
         
-        if cache_key in self.file_cache:
-            return self.file_cache[cache_key]
-        
+        # Fallback to API (but this should rarely happen in cross-repo analysis)
         try:
             repo = self.github_client.get_repo(repo_name)
             file_content_obj = repo.get_contents(file_path)
+            content = file_content_obj.decoded_content.decode('utf-8')
             
-            # Only skip extremely large files (>500KB) to avoid memory issues
-            if file_content_obj.size > self.max_file_size:
-                print(f"Large file detected: {file_path} ({file_content_obj.size} bytes) - processing anyway")
-                # Still process but with truncation for analysis
-                content = file_content_obj.decoded_content.decode('utf-8')[:self.max_file_size]
-            else:
-                content = file_content_obj.decoded_content.decode('utf-8')
+            # Cache the content for future use
+            self.cache._save_file_to_cache(repo_name, file_path, content)
             
-            self.file_cache[cache_key] = content
             return content
             
         except Exception as e:
@@ -246,35 +261,36 @@ class CrossRepoAnalyzer:
     
     def analyze_cross_repo_dependencies(self, source_repo_name: str, dependencies: List[Dict], 
                                       source_file_path: str, target_repo_names: List[str] = None) -> Dict[str, Any]:
-        """Analyze dependencies across specific repositories with optimizations"""
+        """Analyze dependencies across specific repositories using cached files"""
         if not target_repo_names:
             target_repo_names = []
+        
+        # Pre-populate cache for all target repositories
+        print("Preparing repository cache for cross-repo analysis...")
+        cached_repositories = self.prepare_repositories_cache(target_repo_names)
         
         cross_repo_impacts = {
             'analyzed_repos': target_repo_names,
             'cross_repo_dependencies': [],
             'affected_repositories': [],
-            'summary': ''
+            'summary': '',
+            'cache_stats': self.cache.get_cache_stats()
         }
         
-        # Add batch_size if not already defined
-        if not hasattr(self, 'batch_size'):
-            self.batch_size = 20
-        
-        # Use ThreadPoolExecutor for parallel processing
+        # Use ThreadPoolExecutor for parallel processing with cached files
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # Submit all repository analysis tasks
+            # Submit all repository analysis tasks using cached files
             future_to_repo = {
-                executor.submit(self._analyze_single_repo_comprehensive, source_repo_name, source_file_path, 
-                              dependencies, target_repo): target_repo
+                executor.submit(self._analyze_single_repo_from_cache, source_repo_name, source_file_path, 
+                              dependencies, target_repo, cached_repositories.get(target_repo, {})): target_repo
                 for target_repo in target_repo_names
-                if target_repo != source_repo_name
+                if target_repo != source_repo_name and target_repo in cached_repositories
             }
             
-            # Collect results with longer timeout for comprehensive analysis
+            # Collect results
             for future in future_to_repo:
                 try:
-                    repo_impacts = future.result(timeout=120)  # Increased timeout to 2 minutes
+                    repo_impacts = future.result(timeout=60)  # Reduced timeout since we're using cache
                     if repo_impacts:
                         cross_repo_impacts['cross_repo_dependencies'].extend(repo_impacts)
                 except Exception as e:
@@ -301,6 +317,84 @@ class CrossRepoAnalyzer:
         cross_repo_impacts['summary'] = self._generate_cross_repo_summary(cross_repo_impacts)
         
         return cross_repo_impacts
+    
+    def _analyze_single_repo_from_cache(self, source_repo_name: str, source_file_path: str, 
+                                       dependencies: List[Dict], target_repo_name: str, 
+                                       cached_files: Dict[str, str]) -> List[Dict]:
+        """Analyze a single repository using cached files (no API calls)"""
+        print(f"Analyzing cached files for: {target_repo_name} ({len(cached_files)} files)")
+        start_time = time.time()
+        
+        repo_impacts = []
+        
+        if not cached_files:
+            print(f"No cached files available for {target_repo_name}")
+            return repo_impacts
+        
+        try:
+            # Create dependency search patterns for efficient matching
+            dependency_patterns = self._create_search_patterns(dependencies, source_repo_name, source_file_path)
+            
+            # Process files in batches for memory efficiency
+            file_paths = list(cached_files.keys())
+            
+            for i in range(0, len(file_paths), self.batch_size):
+                batch_files = file_paths[i:i + self.batch_size]
+                batch_impacts = self._process_cached_file_batch(
+                    target_repo_name, batch_files, cached_files, dependency_patterns, 
+                    source_repo_name, source_file_path, dependencies
+                )
+                repo_impacts.extend(batch_impacts)
+                
+                # Progress indicator
+                if i % (self.batch_size * 5) == 0:
+                    print(f"Processed {min(i + self.batch_size, len(file_paths))}/{len(file_paths)} files in {target_repo_name}")
+            
+            elapsed_time = time.time() - start_time
+            print(f"Completed cached analysis of {target_repo_name} in {elapsed_time:.2f} seconds - found {len(repo_impacts)} impacts")
+            
+        except Exception as e:
+            print(f"Error in cached analysis of {target_repo_name}: {e}")
+        
+        return repo_impacts
+    
+    def _process_cached_file_batch(self, target_repo_name: str, file_paths: List[str], 
+                                  cached_files: Dict[str, str], dependency_patterns: Dict[str, List[str]], 
+                                  source_repo_name: str, source_file_path: str, dependencies: List[Dict]) -> List[Dict]:
+        """Process a batch of cached files efficiently"""
+        batch_impacts = []
+        
+        for file_path in file_paths:
+            try:
+                file_content = cached_files.get(file_path, '')
+                
+                if file_content:
+                    # Quick pattern matching first
+                    potential_matches = []
+                    
+                    for dep_name, patterns in dependency_patterns.items():
+                        if any(pattern in file_content for pattern in patterns):
+                            # Find the actual dependency object
+                            matching_dep = next((d for d in dependencies if d.get('name') == dep_name), None)
+                            if matching_dep:
+                                potential_matches.append(matching_dep)
+                    
+                    # Detailed analysis only for files with potential matches
+                    if potential_matches:
+                        for dependency in potential_matches:
+                            impact_analysis = self._analyze_cross_repo_impact(
+                                source_repo_name, target_repo_name, file_path,
+                                file_content, dependency, source_file_path
+                            )
+                            
+                            if impact_analysis:
+                                batch_impacts.append(impact_analysis)
+                                
+            except Exception as e:
+                print(f"Error processing cached file {file_path}: {e}")
+                continue
+        
+        return batch_impacts
     
     def _analyze_single_repo_comprehensive(self, source_repo_name: str, source_file_path: str, 
                                          dependencies: List[Dict], target_repo_name: str) -> List[Dict]:
